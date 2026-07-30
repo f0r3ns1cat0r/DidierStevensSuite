@@ -2,8 +2,8 @@
 
 __description__ = 'ZIP dump utility'
 __author__ = 'Didier Stevens'
-__version__ = '0.0.35'
-__date__ = '2026/03/11'
+__version__ = '0.0.36'
+__date__ = '2026/07/30'
 
 """
 
@@ -78,6 +78,8 @@ History:
   2026/01/16: 0.0.33 added sha256 to option -E
   2026/03/07: 0.0.34 update for yara.StringMatch
   2026/03/11: 0.0.35 added forcedecompress
+  2026/06/08: 0.0.36 added option metadata_encoding
+  2026/06/09: added flags description for PK fil and dir records
 
 Todo:
 """
@@ -695,11 +697,13 @@ def ProcessAt(argument):
     else:
         return [argument]
 
-def CreateZipFileObject(arg1, arg2):
+def CreateZipFileObject(arg1, arg2, metadata_encoding=None):
+    if metadata_encoding == '':
+        metadata_encoding = None
     if 'AESZipFile' in dir(zipfile):
         return zipfile.AESZipFile(arg1, arg2)
     else:
-        return zipfile.ZipFile(arg1, arg2)
+        return zipfile.ZipFile(arg1, arg2, metadata_encoding=metadata_encoding)
 
 def YARACompile(ruledata):
     if ruledata.startswith('#'):
@@ -5333,22 +5337,22 @@ def ZIPDump(zipfilename, options, data=None):
 
     FixPipe()
     if data != None:
-        oZipfile = CreateZipFileObject(DataIO(data), 'r')
+        oZipfile = CreateZipFileObject(DataIO(data), 'r', options.metadata_encoding)
     elif zipfilename == '':
         if sys.platform == 'win32':
             import msvcrt
             msvcrt.setmode(sys.stdin.fileno(), os.O_BINARY)
         if sys.version_info[0] > 2:
-            oZipfile = CreateZipFileObject(DataIO(sys.stdin.buffer.read()), 'r')
+            oZipfile = CreateZipFileObject(DataIO(sys.stdin.buffer.read()), 'r', options.metadata_encoding)
         else:
-            oZipfile = CreateZipFileObject(DataIO(sys.stdin.read()), 'r')
+            oZipfile = CreateZipFileObject(DataIO(sys.stdin.read()), 'r', options.metadata_encoding)
     else:
-        oZipfile = CreateZipFileObject(zipfilename, 'r')
+        oZipfile = CreateZipFileObject(zipfilename, 'r', options.metadata_encoding)
     zippassword = options.password
     if not options.regular and len(oZipfile.infolist()) == 1:
         try:
             if oZipfile.open(oZipfile.infolist()[0], 'r', C2BIP3(zippassword)).read(2) == b'PK':
-                oZipfile2 = CreateZipFileObject(DataIO(oZipfile.open(oZipfile.infolist()[0], 'r', C2BIP3(zippassword)).read()), 'r')
+                oZipfile2 = CreateZipFileObject(DataIO(oZipfile.open(oZipfile.infolist()[0], 'r', C2BIP3(zippassword)).read()), 'r', options.metadata_encoding)
                 oZipfile.close()
                 oZipfile = oZipfile2
         except:
@@ -5571,6 +5575,24 @@ class cPKRecord(object):
                 0o02: 'S_IFCHR',
                 0o01: 'S_IFIFO',
             },
+            'flags': {
+                0x0001: 'File is encrypted (traditional PKZIP encryption)',
+                0x0002: 'Compression option (depends on compression method)',
+                0x0004: 'Compression option (depends on compression method)',
+                0x0008: 'Data descriptor follows compressed data (CRC and sizes not known when header written)',
+                0x0010: 'Enhanced Deflate compression option',
+                0x0020: 'Compressed patched data',
+                0x0040: 'Strong encryption',
+                0x0080: 'Unused/reserved',
+                0x0100: 'Language encoding flag (UTF-8 filenames/comments)',
+                0x0200: 'Reserved',
+                0x0400: 'Strong encryption',
+                0x0800: 'UTF-8 filenames/comments (modern ZIP specification)',
+                0x1000: 'Reserved by PKWARE',
+                0x2000: 'Central directory encryption',
+                0x4000: 'Reserved',
+                0x8000: 'Reserved',
+            },
         }
 
         def DecodeFileAttributes(fileattributes):
@@ -5610,6 +5632,13 @@ class cPKRecord(object):
         elif self.formatFormat[index] == 'dictionary':
             value = self.fields[index]
             value = '%d (%s)' % (value, dDictionaries[self.formatDescription[index]].get(value, '<UNKNOWN>'))
+        elif self.formatFormat[index] == 'flags':
+            value = self.fields[index]
+            flagDescriptions = []
+            for flagBit, flagDescription in dDictionaries[self.formatDescription[index]].items():
+                if value & flagBit != 0:
+                    flagDescriptions.append(flagDescription)
+            value = '0x%04x (%s)' % (value, ' '.join(flagDescriptions))
         else:
             value = self.formatFormat[index] % self.fields[index]
         return '%s:%s' % (self.formatDescription[index], value)
@@ -5621,7 +5650,7 @@ class cPKFILE(cPKRecord):
         self.extra = None
         format = '<HHHHHHHIIIHH'
         self.formatDescription = ['signature1', 'signature2', 'version', 'flags', 'compressiontype', 'filetime', 'filedate', 'crc', 'compressedsize', 'uncompressedsize', 'filenamelength', 'extrafieldlength']
-        self.formatFormat = ['%04x', '%04x', '', '', 'dictionary', '%08x', '%08x', '%08x', '', '', '', '']
+        self.formatFormat = ['%04x', '%04x', '', 'flags', 'dictionary', '%08x', '%08x', '%08x', '', '', '', '']
         formatLength = struct.calcsize(format)
         dataFields = data[:formatLength]
         if len(dataFields) == formatLength:
@@ -5635,7 +5664,7 @@ class cPKDIR(cPKRecord):
         self.data = None
         format = '<HHHHHHHHIIIHHHHHIIH'
         self.formatDescription = ['signature1', 'signature2', 'versionmadeby', 'versiontoextract', 'flags', 'compressiontype', 'filetime', 'filedate', 'crc', 'compressedsize', 'uncompressedsize', 'filenamelength', 'extrafieldlength', 'filecommentlength', 'disknumberstart', 'internalattributes', 'externalattributes', 'headeroffset']
-        self.formatFormat = ['%04x', '%04x', '', '', '', 'dictionary', '%08x', '%08x', '%08x', '', '', '', '', '', '', '', '', '']
+        self.formatFormat = ['%04x', '%04x', '', '', 'flags', 'dictionary', '%08x', '%08x', '%08x', '', '', '', '', '', '', '', '', '']
         formatLength = struct.calcsize(format)
         dataFields = data[:formatLength]
         if len(dataFields) == formatLength:
@@ -5653,8 +5682,15 @@ class cPKEND(cPKRecord):
         if len(dataFields) == formatLength:
             self.fields = struct.unpack(format, dataFields)
 
+def RawStringOutput(data, metadata_encoding):
+    if metadata_encoding == '':
+        return repr(data)
+    else:
+        encodingvalue, errorsvalue = ParseOptionEncodingSub2(metadata_encoding)
+        return data.decode(encodingvalue, errorsvalue)
+
 #a# todo: add more record types - https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT
-def ParseZIPRecord(data):
+def ParseZIPRecord(data, metadata_encoding):
     if data[0:2] != b'PK':
         return None
     magic = 'PK'
@@ -5669,7 +5705,7 @@ def ParseZIPRecord(data):
                 length = struct.unpack('<H', data[26:28])[0]
                 filename = data[30:30 + length]
                 if len(filename) == length:
-                    magic += ' ' + repr(filename)
+                    magic += ' ' + RawStringOutput(filename, metadata_encoding)
         elif data[2:4] == b'\x01\x02':
             magic += ' dir'
             oPKRecord = cPKDIR(data)
@@ -5677,7 +5713,7 @@ def ParseZIPRecord(data):
                 length = struct.unpack('<H', data[28:30])[0]
                 filename = data[46:46 + length]
                 if len(filename) == length:
-                    magic += ' ' + repr(filename)
+                    magic += ' ' + RawStringOutput(filename, metadata_encoding)
         elif data[2:4] == b'\x05\x06':
             magic += ' end'
             oPKRecord = cPKEND(data)
@@ -5781,7 +5817,7 @@ def AnalyzeZIPRecord(data, options):
         StdoutWriteChunked(DumpFunction(CutData(data, options.cut)))
         return
     else:
-        print(' Comment field: %s' % repr(data[:commentLength]))
+        print(' Comment field: %s' % RawStringOutput(data[:commentLength], metadata_encoding))
 
 PARSE_SELECT_SOURCE = 'source'
 PARSE_SELECT_DATA = 'data'
@@ -5812,7 +5848,7 @@ def ParsePKRecordSelect(select):
 
 def ZIPFind(zipfilename, options):
     data = cBinaryFile(zipfilename, C2BIP3(options.password), True, True).read()
-    locations = [entry for entry in [[location, ParseZIPRecord(data[location:])] for location in FindAll(data, b'PK')] if entry[1] != None]
+    locations = [entry for entry in [[location, ParseZIPRecord(data[location:], options.metadata_encoding)] for location in FindAll(data, b'PK')] if entry[1] != None]
     records = []
     index = 1
     if len(locations) > 0 and locations[0][0] != 0:
@@ -5982,6 +6018,7 @@ def Main():
     oParser.add_option('-i', '--info', action='store_true', default=False, help='display extra info')
     oParser.add_option('-W', '--write', type=str, default='', help='Write all files to disk')
     oParser.add_option('--stats', action='store_true', default=False, help='produce statistics')
+    oParser.add_option('--metadata_encoding', type=str, default='', help='Provide encoding of strings like filename and comment, when parsed via option -f')
     (options, args) = oParser.parse_args()
 
     if options.man:
